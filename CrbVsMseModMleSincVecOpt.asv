@@ -1,0 +1,81 @@
+% Delay estimation: CRBs (for code only and (code + carrier frequency)) and MSE of MLE of delay based on a real positive amplitude model (so-called modified MLE)
+% The oversampling of the MLE is performed via sinc (Shannon theorem)
+
+%% SET UP
+
+clear all
+close all
+addpath('utils');
+addDisp	= false;	% additional displays (true, false)
+
+output_path = [out_folder '/' ]; 
+
+%% Activate modules
+ML = 0;
+AF = 0;
+%% Selection of system parameters
+nMC = 1e2;
+sampFreq = 1;
+fc = 1540;
+nCode = 1;
+interpDt = (1/fc)*20;        % the time interval over which the oversampling is performed is [-interpDt/2,interpDt/2]
+nbPtPerTc = 60e3;             % number of parameter value per 1/fc
+selThreshold = 0.25;				  % (dB20) selection threshold : parameter values for which the (correlation funtion)^2 is >= Max - selThreshold
+snrOut = -10:140;		  % (dB10)
+PRN	= 1;		           % 1 <= PRN <= 32
+code = 2*reshape(GenerateCACode(PRN),[],1)-1;
+nChips = numel(code);
+codeSamp = reshape(ones(sampFreq,1)*code',[],1);
+nCodeSamp = numel(codeSamp);
+dataSampIn = reshape([codeSamp;zeros(nCodeSamp-1,1)]',[],1);   % NonCircular MLE
+NdopplerBins = 21;
+% For Fusion Implementation
+sigma_start = -6;
+sigma_end= 0;
+sigma_steps = sigma_end - sigma_start + 1;
+
+
+
+f_o = 1.023e6;
+b = 500/(f_o*fc); %Hz
+fd = b*fc;
+t = linspace(0, (numel(dataSampIn)-1)/sampFreq,numel(dataSampIn));
+dataSampIn_true = dataSampIn.*exp(1i*2*pi*(fd).*t');
+dataSampSignal_true = fft(dataSampIn_true);
+
+%% Define output settings
+out_folder = 'Results';
+out_filename = join(['Data', '_nMC', string(nMC), '_Fc', string(fc), '_Fs', string(sampFreq) ], '');
+date_hash = strrep(join([extractBetween(string(datetime), 1,2) strrep(extractBetween(string(datetime), 13, 17), ':', '')]), ' ' ,'_');
+out_filename = join([out_filename  date_hash], '_');
+
+%% CRAMER-RAO BOUND
+
+[crb_medina, crb_eusipco, crb_camsap]  = ComputeCRB(nCodeSamp, codeSamp, sampFreq, snrOut, fc, b);
+
+[crb_fusion_eta, crb_fusion_tau] = compute_fusion_CRB_loop(nCodeSamp, codeSamp, sampFreq, snrOut, fc, b, sigma_start, sigma_end, sigma_steps);
+
+fig = showCRB_fusion(snrOut, crb_medina, crb_eusipco, crb_camsap, crb_fusion_eta, crb_fusion_tau, sampFreq, fc, sigma_start, sigma_end, sigma_steps);
+
+savefig(fig, output_path + "\CRB_fusion"+ date_hash +".fig")
+
+%% AMBIGUITY FUNCTION 
+if AF
+    [codeCorFunc, tScale, iMax2, delayTrue] = computeAmbiguityFunction(dataSampIn, sampFreq, fc, selThreshold, addDisp);
+end
+
+
+
+%% MAXIMUM LIKELIHOOD     
+if ML
+    sigma_doppler       = sqrt(crb_dop_ppp);
+    amp					= sqrt((10.^(snrOut/10))/real(codeSamp'*codeSamp));
+    [mse_tau, mse_b, critSel] = maximumLikelihoodEstimation(dataSampIn_true, tScale, compPhaseDelay, sampFreq, fc, b, NdopplerBins, amp, nMC, overSampFac, matShannon, circularMle, delayTrue, addDisp);
+    
+    %%% Oversampled observation and MLE
+    clear dataSampSignal dataSampSignalC compPhaseDelay matShannon
+end
+%% Save data and figures
+save(output_path + "\workspace_" + date_hash + ".mat")
+
+

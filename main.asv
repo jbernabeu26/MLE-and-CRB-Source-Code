@@ -1,0 +1,243 @@
+% Delay estimation: CRBs (for code only and (code + carrier frequency)) and MSE of MLE of delay based on a real positive amplitude model (so-called modified MLE)
+% The oversampling of the MLE is performed via sinc (Shannon theorem)
+
+
+addpath('utils');
+
+
+nMC					= 1e1;
+
+if (nMC < 1e3)
+   addDisp			= false;	% additional displays (true, false)
+   saveData       = false;
+else
+   addDisp			= false;	% additional displays (true, false)
+   saveData       = true;
+end
+
+%%% 1a) Signal generation
+
+f_o = 1.023e6;
+sampFreq			= 1;
+fc					= 1540;
+nCode				= 1;
+interpDt       = (1/fc)*20;        % the time interval over which the oversampling is performed is [-interpDt/2,interpDt/2]
+nbPtPerTc      = 60e3;             % number of parameter value per 1/fc
+selThreshold	= 0.25;				  % (dB20) selection threshold : parameter values for which the (correlation funtion)^2 is >= Max - selThreshold
+snrOut			= (55:5:90);		  % (dB10)
+PRN				= 1;		           % 1 <= PRN <= 32
+%
+code				= 2*reshape(GenerateCACode(PRN),[],1)-1;
+nChips			= numel(code);
+codeSamp			= reshape(ones(sampFreq,1)*code',[],1);
+nCodeSamp		= numel(codeSamp);
+dataSampIn		= reshape([codeSamp;zeros(nCodeSamp-1,1)]',[],1);   % NonCircular MLE
+NdopplerBins    = 21;
+b              = 500/(f_o*fc); %Hz
+fd = b*fc;
+t = linspace(0, (numel(dataSampIn)-1)/sampFreq,numel(dataSampIn));
+dataSampIn_true = dataSampIn.*exp(1i*2*pi*(fd).*t');
+dataSampSignal_true = fft(dataSampIn_true);
+
+%***************************************************************************************
+% Every time you start MATLAB, the generator resets itself to the same state. 
+% Any script or function that calls the random number functions returns the same result whenever you restart.
+% Each time you call rng('shuffle'), it reseeds the generator using a different seed based on the current time.
+rng('shuffle') 
+
+selThres				= 10^(selThreshold/20);
+
+%% AMBIGUITY FUNCTION 
+
+if (~exist('nCode'))
+	nCode				= 1;
+end
+if (numel(dataSampIn) == numel(codeSamp))
+   circularMle    = true;
+else
+   circularMle    = false;
+end
+nSimSampIntObs		= numel(dataSampIn);
+isRealDataIn		= sum(abs(imag(dataSampIn))) == 0;
+nSimSampIntObs		= numel(dataSampIn);
+dataSampSignal		= fft(dataSampIn,nSimSampIntObs);
+dataSampSignalC   = conj(dataSampSignal);
+normCorr				= sqrt(sum(abs(dataSampIn).^2));
+
+if (1)
+	codeCorFunc		= fftshift(ifft(dataSampSignal.*dataSampSignalC))/normCorr;	% MLE correlation function (normalized output noise power)
+else
+	codeCorFunc		= fftshift(ifft(abs(dataSampSignal).^2))/normCorr;				% MLE correlation function (normalized output noise power)
+end
+
+[~,iMax]				= max(codeCorFunc);	% <=> max(abs(codeCorFunc).^2)
+
+if (rem(nSimSampIntObs,2) == 0)
+   disp(['max( abs( codeCorFunc(2:iMax-1)    - flipud(conj(codeCorFunc(iMax+1:end)))))      = ', num2str(max(abs(codeCorFunc(2:iMax-1) - flipud(conj(codeCorFunc(iMax+1:end))))))])
+else
+   disp(['max( abs( codeCorFunc(1:iMax-1)    - flipud(conj(codeCorFunc(iMax+1:end)))))      = ', num2str(max(abs(codeCorFunc(1:iMax-1) - flipud(conj(codeCorFunc(iMax+1:end))))))])
+end
+
+if (addDisp)
+   showSignalProps();
+end
+
+nSampDataIn       = numel(codeCorFunc);
+overSampFac			= (fc*nbPtPerTc)/sampFreq;
+sampFreqOut			= sampFreq*overSampFac;
+
+if (overSampFac > 1)
+   interpDt       = (ceil((interpDt/2)*sampFreqOut)/sampFreqOut);
+   tOut           = reshape((-(interpDt*sampFreqOut):1:(interpDt*sampFreqOut))/sampFreqOut,[],1);
+	% A the vicinity of the maximum (real-valued positive real-valued) : real(codeCorFunc.*exp((1j*2*pi*fc)*tOut)) ~= Max*cos((2*pi*fc)*tOut))
+	iSel				= cos((2*pi*fc)*tOut) >= (1/selThres);
+	tOut				= tOut(iSel);
+   disp(['numel(tOut) = ',num2str(numel(tOut)),',   round(numel(iSel)/numel(tOut)) = ', num2str(round(numel(iSel)/numel(tOut)))])
+   interpDt       = tOut(end) - tOut(1);
+   tIn            = ((1:nSampDataIn) - iMax);    % dataIn are sampled at sampFreq
+   matShannon     = repmat(tOut*sampFreq,1,nSampDataIn) - repmat(tIn,numel(tOut),1);
+   if (circularMle)
+      matShannon	= sincp(matShannon,nSampDataIn);
+   else
+      matShannon	= sinc(matShannon);
+   end
+   if (rem(nSampDataIn,2) == 0)
+      matShannon(:,1)= 0;
+   end
+   disp(['size(matShannon) = ',num2str(round(numel(matShannon)*8/(1024^3)*100)/100),' GO'])
+
+   codeCorFunc    = matShannon*codeCorFunc;
+   [~,iMax]			= max(codeCorFunc);	% <=> max(abs(codeCorFunc).^2)
+   it0				= find(tOut == 0);	
+	if (iMax == it0)
+		disp(['max( abs( codeCorFunc(1:iMax-1)    - flipud(conj(codeCorFunc(iMax+1:end)))))      = ', num2str(max(abs(codeCorFunc(1:iMax-1) - flipud(conj(codeCorFunc(iMax+1:end))))))])
+	else
+		disp(['iMax ~= it0, [~,iMax] = max(codeCorFunc) and it0 = find(tOut == 0) => iMax - it0 = ',int2str(iMax - it0)])
+		disp(['max( abs( codeCorFunc(1:it0-1)    - flipud(conj(codeCorFunc(it0+1:end)))))      = ', num2str(max(abs(codeCorFunc(1:it0-1) - flipud(conj(codeCorFunc(it0+1:end))))))])
+		iMax			= it0;
+	end
+
+   if (addDisp)
+      figure
+		subplot(2,1,1)
+      plot(tOut,20*log10(max(abs(codeCorFunc)/normCorr,1e-5)),'-*k','MarkerSize',4),grid,axis tight, 
+      xlabel('Time (T_s)')
+      ylabel('Amplitude (db20)')
+      title('Oversampled Code Correlation Function ')
+      clear iMaxD iSel dataSampD xVal
+   end
+else
+   overSampFac    = 1;
+   sampFreqOut		= sampFreq*overSampFac;
+end
+
+tScale				= tOut;
+compPhaseDelay		= exp((1j*2*pi*fc)*tScale);
+corFunc				= real(codeCorFunc.*compPhaseDelay);
+[~,iMax2]			= max(corFunc);				% <=> max((corFunc).^2)
+delayTrue		   = tOut(iMax2);
+if (iMax2 ~= iMax)
+	warning(['Max of codeCorFunc and max of corFunc do not coincide : dInd = ',int2str(iMax2-iMax),...
+                                                                    ', dt = ',num2str((iMax2-iMax)/sampFreqOut), ' T_s', ...
+                                                                    ', dd = ',num2str((iMax2-iMax)/sampFreqOut*300*1000),' mm'])
+end
+
+if (addDisp)
+	subplot(2,1,2)
+	plot(tScale,20*log10(max(abs(codeCorFunc)/normCorr,1e-5)),'-k',tScale,20*log10(max(abs(corFunc)/normCorr,1e-5)),'-*r','MarkerSize',4),grid,axis tight, 
+	xlabel('Time (T_s)')
+	ylabel('Amplitude (db20)')
+	ylim([-9,1])
+	title('Oversampled (Code Correlation Function) vs (Correlation Function)')
+   clear iMaxD iSel dataSampD xVal
+end
+
+drawnow
+
+%% CRAMER-RAO BOUND
+
+[crb_medina, crb_tau, crb_eta] = ComputeCRB(nCodeSamp, codeSamp, sampFreq, snrOut, fc, b);
+
+%% MAXIMUM LIKELIHOOD 
+
+
+sigma_doppler       = sqrt(crb_eta.b);
+amp					= sqrt((10.^(snrOut/10))/real(codeSamp'*codeSamp));
+mse_tau					= zeros(numel(amp),1);
+mse_b					= zeros(numel(amp),1);
+critSel             = zeros(nMC,numel(amp)); 
+
+%%% Oversampled observation and MLE
+for iAmp	= 1:numel(amp)
+
+    disp([int2str(round(iAmp/numel(amp)*100)), ' %'])
+
+    %%% 1a) Generate doppler compensation exponential
+
+    Ad = 6*sigma_doppler(iAmp);
+    dopplerBinsHz  = linspace(b - Ad, b + Ad, NdopplerBins).'; 
+    compPhaseDelay = exp(1j*2*pi*fc*(1-dopplerBinsHz).*tScale').';
+    doppler_table = exp(1j*2*pi*fc*dopplerBinsHz.*t).*dataSampIn.';
+    Ftdoppler_table = fft(doppler_table,[],2);
+    Ftcdoppler_table = conj(Ftdoppler_table).';
+    
+   %%% 2a) Noise generation
+   for iMC = 1:nMC
+        dataSampNoise		= (randn(1,nSimSampIntObs) + 1j* randn(1, nSimSampIntObs))/sqrt(2);      % arr(nSimSampIntObs,nMC)
+        dataSampSignalAtt    = dataSampIn_true*amp(iAmp)+ dataSampNoise.';
+
+        FtdataSampSignalAtt = fft(dataSampSignalAtt);
+        sigCorFunc			= fftshift(ifft(FtdataSampSignalAtt.*Ftcdoppler_table,[],1),1)/normCorr;  % arr(nSimSampIntObs,nMC)
+        clear dataSampNoise
+        
+        %%% 2b) iterative MLE oversampling
+        if (overSampFac > 1)
+            sigCorFunc =  matShannon*sigCorFunc;
+        end
+        sigCorrMat = real(sigCorFunc.*compPhaseDelay);
+        % Tau estimate
+        [maxmain,iMaxmain]			= max(sigCorrMat,[],2);		
+        [~,itaumain]			= max(maxmain);
+        iFdmain             =   iMaxmain(itaumain);
+        % Doppler estimate
+        clear sigCorFunc
+        delayEst	         = tScale(itaumain);
+        critSel(iMC,iAmp)         = maxmain(itaumain) > 0;
+        doppler              = dopplerBinsHz(iFdmain); 
+        
+        
+        mse_tau(iAmp)		     = mse_tau(iAmp) + ((delayEst - delayTrue)*critSel(iMC,iAmp)).^2;
+        mse_b(iAmp) = mse_b(iAmp)+ ((doppler - b)*critSel(iMC)).^2;
+   end
+   mse_tau(iAmp) =  mse_tau(iAmp)/sum(critSel(:,iAmp));
+   mse_b(iAmp) =  mse_b(iAmp)/sum(critSel(:,iAmp));
+   
+end
+
+clear dataSampSignal dataSampSignalC compPhaseDelay matShannon
+%% Plot results
+
+% Define legends
+legend_medina = "CRB^{m}_{\tau}";
+legend_tau = "CRB_{\tau}";
+legend_eta = "CRB_{\tau;\eta}"; 
+legend_mse = "MSE"; 
+
+figure
+pmse = plot(snrOut,10*log10(mse_tau), LineWidth=1.5);
+hold on
+pmedina =plot(snrOut,10*log10(crb_medina.tau));
+hold on 
+ptau = plot(snrOut,10*log10(crb_tau.tau));
+hold on 
+peta = plot(snrOut,10*log10(crb_eta.tau));
+
+xlabel("$$SNR_{OUT} [dB]$$",'Interpreter','latex')
+ylabel("$$MSE \,\, m^{2} \,\, [dB]$$",'Interpreter','latex')
+
+axis tight
+grid
+l = legend([legend_mse, legend_medina, legend_tau, legend_eta]);
+set(l,'Interpreter','tex')
+
+
